@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Đề 5 - Cảnh báo té ngã (ESP32 + MPU6050)</title>
+<script src="https://unpkg.com/mqtt@5.10.1/dist/mqtt.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+<style>
+  body { font-family: Arial, sans-serif; background:#f4f4f9; margin:0; padding:20px; text-align:center; }
+  .container { max-width:900px; margin:0 auto; }
+  .card { background:#fff; border-radius:10px; padding:18px; margin:15px 0; box-shadow:0 4px 10px rgba(0,0,0,.1); }
+  .row { display:flex; gap:15px; flex-wrap:wrap; }
+  .row .card { flex:1; min-width:250px; }
+  #conn { font-weight:bold; color:orange; }
+  .value { font-size:36px; font-weight:bold; margin:8px 0; }
+  #accel-val { color:#e67e22; } #angle-val { color:#2980b9; }
+  #alert { font-size:28px; font-weight:bold; padding:15px; border-radius:10px; background:#2ecc71; color:#fff; }
+  #alert.fall { background:#e74c3c; animation: blink 0.6s infinite; }
+  @keyframes blink { 50% { opacity:.4; } }
+  .btn { padding:12px 22px; font-size:17px; font-weight:bold; border:none; border-radius:6px; color:#fff; cursor:pointer; margin:6px; }
+  .on { background:#2ecc71; } .off { background:#e74c3c; } .reset { background:#34495e; }
+  canvas { max-width:100%; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>Hệ Thống Cảnh Báo Té Ngã</h1>
+  <div id="conn">Đang kết nối đến EMQX Broker...</div>
+
+  <div class="card"><div id="alert">BÌNH THƯỜNG</div></div>
+
+  <div class="row">
+    <div class="card">
+      <div>Gia tốc tổng (SVM)</div>
+      <div class="value"><span id="accel-val" class="data">--</span> g</div>
+    </div>
+    <div class="card">
+      <div>Góc nghiêng</div>
+      <div class="value"><span id="angle-val" class="data">--</span> °</div>
+    </div>
+  </div>
+
+  <div class="row">
+    <div class="card"><canvas id="chartAccel"></canvas></div>
+    <div class="card"><canvas id="chartAngle"></canvas></div>
+  </div>
+
+  <div class="card">
+    <h3>Điều khiển thủ công</h3>
+    <div>Đèn LED:
+      <button class="btn on"  onclick="sendControl(T_LED,'ON')">BẬT</button>
+      <button class="btn off" onclick="sendControl(T_LED,'OFF')">TẮT</button>
+    </div>
+    <div>Loa cảnh báo:
+      <button class="btn on"  onclick="sendControl(T_BUZZER,'ON')">BẬT</button>
+      <button class="btn off" onclick="sendControl(T_BUZZER,'OFF')">TẮT</button>
+    </div>
+    <div><button class="btn reset" onclick="sendControl(T_RESET,'RESET')">RESET CẢNH BÁO</button></div>
+  </div>
+</div>
+
+<script>
+  // ===== 1. Topic (PHẢI trùng PREFIX trong code ESP32) =====
+  const PREFIX   = "lab2de5_DuongKimTungDuong_231432199";
+  const T_ACCEL  = PREFIX + "/mpu6050/accel";
+  const T_ANGLE  = PREFIX + "/mpu6050/angle";
+  const T_STATUS = PREFIX + "/status";
+  const T_LED    = PREFIX + "/device/led";
+  const T_BUZZER = PREFIX + "/device/buzzer";
+  const T_RESET  = PREFIX + "/device/reset";
+
+  // ===== 2. Kết nối broker qua WebSocket bảo mật (wss, cổng 8084) =====
+  const brokerUrl = "wss://broker.emqx.io:8084/mqtt";
+  const client = mqtt.connect(brokerUrl, {
+    clientId: "fall_web_" + Math.random().toString(16).slice(2, 10),
+    keepalive: 60
+  });
+
+  // ===== 3. Biểu đồ =====
+  const MAX_POINTS = 40;
+  function makeChart(id, label, color) {
+    return new Chart(document.getElementById(id), {
+      type: "line",
+      data: { labels: [], datasets: [{ label, data: [], borderColor: color, tension: .3, pointRadius: 0 }] },
+      options: { animation: false, scales: { x: { ticks: { maxTicksLimit: 6 } } } }
+    });
+  }
+  const chartAccel = makeChart("chartAccel", "Gia tốc SVM (g)", "#e67e22");
+  const chartAngle = makeChart("chartAngle", "Góc nghiêng (°)", "#2980b9");
+
+  function pushPoint(chart, value) {
+    chart.data.labels.push(new Date().toLocaleTimeString());
+    chart.data.datasets[0].data.push(value);
+    if (chart.data.labels.length > MAX_POINTS) {
+      chart.data.labels.shift();
+      chart.data.datasets[0].data.shift();
+    }
+    chart.update();
+  }
+
+  // ===== 4. Sự kiện MQTT =====
+  client.on("connect", () => {
+    const el = document.getElementById("conn");
+    el.innerText = "Đã kết nối EMQX Broker thành công!";
+    el.style.color = "#2ecc71";
+    client.subscribe([T_ACCEL, T_ANGLE, T_STATUS]);
+  });
+
+  client.on("close", () => {
+    const el = document.getElementById("conn");
+    el.innerText = "Mất kết nối với EMQX Broker!";
+    el.style.color = "#e74c3c";
+  });
+
+  client.on("message", (topic, payload) => {
+    const msg = payload.toString();
+    if (topic === T_ACCEL) {
+      document.getElementById("accel-val").innerText = msg;
+      pushPoint(chartAccel, parseFloat(msg));
+    } else if (topic === T_ANGLE) {
+      document.getElementById("angle-val").innerText = msg;
+      pushPoint(chartAngle, parseFloat(msg));
+    } else if (topic === T_STATUS) {
+      const box = document.getElementById("alert");
+      if (msg === "FALL") { box.innerText = "⚠ PHÁT HIỆN TÉ NGÃ!"; box.className = "fall"; }
+      else { box.innerText = "BÌNH THƯỜNG"; box.className = ""; }
+    }
+  });
+
+  // ===== 5. Gửi lệnh điều khiển =====
+  function sendControl(topic, command) {
+    if (client.connected) client.publish(topic, command, { qos: 0, retain: false });
+    else alert("Chưa kết nối được với EMQX Broker!");
+  }
+</script>
+</body>
+</html>
